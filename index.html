@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Slender Forest 3D</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Courier New', Courier, monospace; }
+
+        /* Интерфейс */
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 20px;
+            z-index: 10;
+            pointer-events: none;
+            text-shadow: 2px 2px 0 #000;
+        }
+
+        /* Прицел */
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 10px; height: 10px;
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        /* Подсказка "Нажми E" */
+        #interaction {
+            position: absolute;
+            top: 60%;
+            width: 100%;
+            text-align: center;
+            color: white;
+            font-size: 24px;
+            display: none;
+            z-index: 10;
+            text-shadow: 0 0 10px black;
+        }
+
+        /* Экран смерти/победы */
+        #game-over {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: black;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: red;
+            z-index: 100;
+        }
+        #game-over h1 { font-size: 80px; margin: 0; }
+        #game-over p { color: white; font-size: 24px; cursor: pointer; margin-top: 20px; border: 1px solid white; padding: 10px; }
+
+        /* Статика/Помехи при приближении врага */
+        #static-overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: url('https://media.giphy.com/media/oEI9uBYSzLpBK/giphy.gif'); /* GIF шума */
+            background-size: cover;
+            opacity: 0;
+            pointer-events: none;
+            mix-blend-mode: screen;
+            z-index: 20;
+            transition: opacity 0.2s;
+        }
+
+        /* Инструкция */
+        #start-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 99;
+            text-align: center;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+</head>
+<body>
+
+<div id="ui">
+    Записки: <span id="score">0</span> / 10 <br>
+    <span id="status-text" style="font-size: 16px; color: #aaa;">Найди записки...</span>
+</div>
+
+<div id="crosshair"></div>
+<div id="interaction">Нажми [E], чтобы взять</div>
+<div id="static-overlay"></div>
+
+<div id="start-screen">
+    <h1>ЛЕС КОШМАРОВ</h1>
+    <p>Цель: Найди 10 записок и добеги до выхода.</p>
+    <p>Управление: WASD - Ходить, SHIFT - Бег, Мышь - Обзор, E - Взять записку.</p>
+    <p style="color: yellow; margin-top: 20px;">КЛИКНИ ЧТОБЫ НАЧАТЬ</p>
+</div>
+
+<div id="game-over">
+    <h1 id="end-title">ТЫ ПОГИБ</h1>
+    <p onclick="location.reload()">ПОПРОБОВАТЬ СНОВА</p>
+</div>
+
+<script>
+    // === НАСТРОЙКИ ===
+    const TOTAL_NOTES = 10;
+    const WALK_SPEED = 40; // скорость ходьбы
+    const RUN_SPEED = 80;  // скорость бега
+    const MAP_SIZE = 400;  // размер карты
+    const TREE_COUNT = 300;
+
+    // === ПЕРЕМЕННЫЕ ===
+    let scene, camera, renderer, controls;
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false, isRunning = false;
+    let prevTime = performance.now();
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+
+    let notes = []; // массив объектов записок
+    let collectedCount = 0;
+    let raycaster = new THREE.Raycaster(); // луч для проверки взгляда
+    let nearbyNote = null; // записка, на которую смотрим
+
+    let ghost;
+    let ghostActive = false;
+    let gameOver = false;
+
+    // Инициализация
+    init();
+    animate();
+
+    function init() {
+        // 1. Сцена и туман
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050505);
+        scene.fog = new THREE.FogExp2(0x000000, 0.025); // Густой черный туман
+
+        // 2. Камера
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 1, 1000);
+        camera.position.y = 10; // Высота глаз
+
+        // 3. Свет (Фонарик)
+        // Окружающий свет очень слабый
+        const ambientLight = new THREE.AmbientLight(0x111111);
+        scene.add(ambientLight);
+
+        // Фонарик привязан к камере
+        const flashlight = new THREE.SpotLight(0xffffff, 2, 60, 0.6, 0.5, 1);
+        flashlight.position.set(0, 0, 0); // Относительно камеры
+        flashlight.target.position.set(0, 0, -1);
+        camera.add(flashlight);
+        camera.add(flashlight.target);
+        scene.add(camera);
+
+        // 4. Земля
+        const floorGeometry = new THREE.PlaneGeometry(MAP_SIZE * 2, MAP_SIZE * 2);
+        const floorMaterial = new THREE.MeshLambertMaterial({ color: 0x0a1a0a }); // Темно-зеленая трава
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        scene.add(floor);
+
+        // 5. Деревья (Процедурная генерация)
+        const treeGeo = new THREE.CylinderGeometry(1, 3, 30, 6); // Ствол
+        const treeMat = new THREE.MeshLambertMaterial({ color: 0x211709 });
+
+        for (let i = 0; i < TREE_COUNT; i++) {
+            const tree = new THREE.Mesh(treeGeo, treeMat);
+            // Случайная позиция
+            tree.position.x = (Math.random() - 0.5) * MAP_SIZE * 2;
+            tree.position.z = (Math.random() - 0.5) * MAP_SIZE * 2;
+            tree.position.y = 15; // Половина высоты
+
+            // Не ставим деревья в центре (стартовая зона)
+            if (Math.abs(tree.position.x) < 20 && Math.abs(tree.position.z) < 20) continue;
+
+            scene.add(tree);
+        }
+
+        // 6. Записки (Белые листы на деревьях или в воздухе)
+        // Создадим простую геометрию листа бумаги
+        const noteGeo = new THREE.PlaneGeometry(1.5, 2);
+        const noteMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+
+        for (let i = 0; i < TOTAL_NOTES; i++) {
+            const note = new THREE.Mesh(noteGeo, noteMat);
+            // Случайно разбросать
+            note.position.x = (Math.random() - 0.5) * MAP_SIZE * 1.8;
+            note.position.z = (Math.random() - 0.5) * MAP_SIZE * 1.8;
+            note.position.y = 6; // На уровне глаз
+
+            // Повернем рандомно
+            note.rotation.y = Math.random() * Math.PI;
+
+            note.name = "note_" + i;
+            scene.add(note);
+            notes.push(note);
+        }
+
+        // 7. Призрак (Создадим его, но скроем пока)
+        // Призрак - это цилиндр с красными глазами
+        const ghostGeo = new THREE.CylinderGeometry(2, 2, 12, 8);
+        const ghostMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // Тело черное
+        ghost = new THREE.Mesh(ghostGeo, ghostMat);
+
+        // Глаза
+        const eyeGeo = new THREE.SphereGeometry(0.5, 8, 8);
+        const eyeMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+        const eye1 = new THREE.Mesh(eyeGeo, eyeMat);
+        eye1.position.set(-0.8, 3, 2);
+        const eye2 = new THREE.Mesh(eyeGeo, eyeMat);
+        eye2.position.set(0.8, 3, 2);
+
+        ghost.add(eye1);
+        ghost.add(eye2);
+
+        ghost.position.y = 6;
+        ghost.position.z = -1000; // Далеко
+        scene.add(ghost);
+
+
+        // 8. Рендерер и Управление
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new THREE.PointerLockControls(camera, document.body);
+
+        // Обработчики событий
+        const startScreen = document.getElementById('start-screen');
+        startScreen.addEventListener('click', () => {
+            controls.lock();
+            startScreen.style.display = 'none';
+        });
+
+        controls.addEventListener('lock', () => { /* Игра идет */ });
+        controls.addEventListener('unlock', () => {
+            if(!gameOver) startScreen.style.display = 'flex';
+        });
+
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    function onKeyDown(event) {
+        switch (event.code) {
+            case 'ArrowUp': case 'KeyW': moveForward = true; break;
+            case 'ArrowLeft': case 'KeyA': moveLeft = true; break;
+            case 'ArrowDown': case 'KeyS': moveBackward = true; break;
+            case 'ArrowRight': case 'KeyD': moveRight = true; break;
+            case 'ShiftLeft': isRunning = true; break;
+            case 'KeyE': tryInteract(); break; // Взаимодействие
+        }
+    }
+
+    function onKeyUp(event) {
+        switch (event.code) {
+            case 'ArrowUp': case 'KeyW': moveForward = false; break;
+            case 'ArrowLeft': case 'KeyA': moveLeft = false; break;
+            case 'ArrowDown': case 'KeyS': moveBackward = false; break;
+            case 'ArrowRight': case 'KeyD': moveRight = false; break;
+            case 'ShiftLeft': isRunning = false; break;
+        }
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Логика сбора записок
+    function tryInteract() {
+        if (nearbyNote) {
+            // Убираем записку
+            scene.remove(nearbyNote);
+            // Удаляем из массива
+            notes = notes.filter(n => n !== nearbyNote);
+            nearbyNote = null;
+            document.getElementById('interaction').style.display = 'none';
+
+            collectedCount++;
+            document.getElementById('score').innerText = collectedCount;
+
+            handleGameProgression();
+        }
+    }
+
+    function handleGameProgression() {
+        const status = document.getElementById('status-text');
+
+        if (collectedCount === 1) {
+            status.innerText = "Оно знает, что ты здесь.";
+            status.style.color = "red";
+            // Активируем призрака
+            ghostActive = true;
+            spawnGhostAway();
+        } else if (collectedCount === 5) {
+            status.innerText = "Беги быстрее, не оборачивайся!";
+        } else if (collectedCount === 10) {
+            status.innerText = "ВЫХОД ОТКРЫЛСЯ! (Просто выживи 10 сек)";
+            // Для упрощения: победа через 10 секунд выживания после сбора
+            setTimeout(winGame, 10000);
+        }
+    }
+
+    function spawnGhostAway() {
+        // Спавним призрака за спиной игрока на расстоянии
+        const angle = camera.rotation.y + Math.PI; // Сзади
+        const dist = 60;
+        ghost.position.x = camera.position.x + Math.sin(angle) * dist;
+        ghost.position.z = camera.position.z + Math.cos(angle) * dist;
+        ghost.lookAt(camera.position);
+    }
+
+    function winGame() {
+        if(gameOver) return;
+        gameOver = true;
+        controls.unlock();
+        document.getElementById('game-over').style.display = 'flex';
+        document.getElementById('end-title').innerText = "ВЫЖИЛ";
+        document.getElementById('end-title').style.color = "green";
+    }
+
+    function loseGame() {
+        if(gameOver) return;
+        gameOver = true;
+        controls.unlock();
+        document.getElementById('game-over').style.display = 'flex';
+    }
+
+    // === ИГРОВОЙ ЦИКЛ ===
+    function animate() {
+        requestAnimationFrame(animate);
+
+        if (controls.isLocked === true && !gameOver) {
+
+            // 1. Рейкастинг (смотрим ли на записку)
+            raycaster.setFromCamera( new THREE.Vector2(0,0), camera );
+            const intersects = raycaster.intersectObjects(notes);
+
+            if (intersects.length > 0 && intersects[0].distance < 15) {
+                nearbyNote = intersects[0].object;
+                document.getElementById('interaction').style.display = 'block';
+                // Эффект увеличения при наведении
+                nearbyNote.material.color.set(0xffdddd);
+            } else {
+                if (nearbyNote) nearbyNote.material.color.set(0xffffff);
+                nearbyNote = null;
+                document.getElementById('interaction').style.display = 'none';
+            }
+
+            // 2. Физика движения
+            const time = performance.now();
+            const delta = (time - prevTime) / 1000;
+
+            velocity.x -= velocity.x * 10.0 * delta;
+            velocity.z -= velocity.z * 10.0 * delta;
+
+            direction.z = Number(moveForward) - Number(moveBackward);
+            direction.x = Number(moveRight) - Number(moveLeft);
+            direction.normalize();
+
+            const currentSpeed = isRunning ? RUN_SPEED : WALK_SPEED;
+
+            if (moveForward || moveBackward) velocity.z -= direction.z * currentSpeed * 10.0 * delta;
+            if (moveLeft || moveRight) velocity.x -= direction.x * currentSpeed * 10.0 * delta;
+
+            controls.moveRight(-velocity.x * delta);
+            controls.moveForward(-velocity.z * delta);
+
+            prevTime = time;
+
+            // 3. Логика врага (Призрака)
+            if (ghostActive) {
+                // Призрак двигается к игроку
+                const playerPos = camera.position;
+                const ghostPos = ghost.position;
+
+                // Вектор к игроку
+                const dx = playerPos.x - ghostPos.x;
+                const dz = playerPos.z - ghostPos.z;
+                const dist = Math.sqrt(dx*dx + dz*dz);
+
+                // Призрак всегда смотрит на игрока
+                ghost.lookAt(playerPos.x, 6, playerPos.z);
+
+                // Логика Слендера: он двигается только если ты на него НЕ смотришь (или очень медленно, если смотришь)
+                // Проверяем угол между направлением взгляда камеры и вектором к призраку
+                const cameraDir = new THREE.Vector3();
+                camera.getWorldDirection(cameraDir);
+                const ghostDir = new THREE.Vector3(ghostPos.x - playerPos.x, 0, ghostPos.z - playerPos.z).normalize();
+                const angle = cameraDir.angleTo(ghostDir);
+
+                // Если angle < 1.0, значит мы смотрим примерно в сторону призрака
+                let speed = (collectedCount + 1) * 4.0 * delta; // Чем больше записок, тем быстрее
+
+                if (angle < 1.2) {
+                    // Мы смотрим на него - он замирает, но вызываем помехи
+                    speed = 0;
+                    if (dist < 50) {
+                        document.getElementById('static-overlay').style.opacity = 1 - (dist / 50);
+                    }
+                } else {
+                     // Мы не смотрим - он бежит
+                     document.getElementById('static-overlay').style.opacity = 0;
+                     // Телепортация поближе, если далеко
+                     if (dist > 100 && Math.random() < 0.005) {
+                         spawnGhostAway();
+                     }
+                }
+
+                // Движение
+                if (dist > 3) {
+                    ghost.position.x += (dx / dist) * speed;
+                    ghost.position.z += (dz / dist) * speed;
+                } else {
+                    // Поймал
+                    loseGame();
+                }
+            }
+        }
+
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
